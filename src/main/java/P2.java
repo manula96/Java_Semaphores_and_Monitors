@@ -160,35 +160,48 @@ class CoffeeMachine {
             lock.unlock();
         }
     }
+
+    // Function to serve clients in order
+    public void serveClientsInOrder(List<Client> clients) throws InterruptedException {
+        for (Client client : clients) {
+            if (client.isHot()) {
+                hotClientRequest(client.getId(), client.getBrewTime());
+            } else {
+                coldClientRequest(client.getId(), client.getBrewTime());
+            }
+        }
+        waitForCompletion(); // Ensure all clients have been served before proceeding
+    }
 }
 
 // Client class representing hot or cold clients
-class Client implements Runnable {
+class Client {
     private String id;
     private int brewTime;
-    private CoffeeMachine coffeeMachine;
     private boolean isHot;
 
-    public Client(String id, int brewTime, CoffeeMachine coffeeMachine, boolean isHot) {
+    public Client(String id, int brewTime, boolean isHot) {
         this.id = id;
         this.brewTime = brewTime;
-        this.coffeeMachine = coffeeMachine;
         this.isHot = isHot;
     }
 
-    @Override
-    public void run() {
-        if (isHot) {
-            coffeeMachine.hotClientRequest(id, brewTime);
-        } else {
-            coffeeMachine.coldClientRequest(id, brewTime);
-        }
+    public String getId() {
+        return id;
+    }
+
+    public int getBrewTime() {
+        return brewTime;
+    }
+
+    public boolean isHot() {
+        return isHot;
     }
 }
 
 public class P2 {
     // Function to read input from file
-    public static List<Client> readInput(CoffeeMachine coffeeMachine, String filename) {
+    public static List<Client> readInput(String filename) {
         List<Client> clients = new ArrayList<>();
         try (BufferedReader br = new BufferedReader(new FileReader(filename))) {
             // Read the number of clients
@@ -202,7 +215,7 @@ public class P2 {
                 int brewTime = Integer.parseInt(parts[1]);
                 boolean isHot = clientId.startsWith("H");
 
-                clients.add(new Client(clientId, brewTime, coffeeMachine, isHot));
+                clients.add(new Client(clientId, brewTime, isHot));
             }
         } catch (IOException e) {
             System.err.println("Error reading input file: " + e.getMessage());
@@ -219,24 +232,10 @@ public class P2 {
 
         String filename = args[0];
         CoffeeMachine coffeeMachine = new CoffeeMachine();
-        List<Client> clients = readInput(coffeeMachine, filename);
+        List<Client> clients = readInput(filename);
 
-        List<Thread> threads = new ArrayList<>();
-
-        // Create and start a thread for each client
-        for (Client client : clients) {
-            Thread t = new Thread(client);
-            threads.add(t);
-            t.start();
-        }
-
-        // Wait for all threads to finish
-        for (Thread t : threads) {
-            t.join();
-        }
-
-        // Wait for all brewing to complete
-        coffeeMachine.waitForCompletion();
+        // Serve clients in order
+        coffeeMachine.serveClientsInOrder(clients);
 
         // Print done when all clients are served
         System.out.println("(" + coffeeMachine.getCurrentTime() + ") DONE");
