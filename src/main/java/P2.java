@@ -9,88 +9,153 @@
  * Java threads and a monitor to ensure proper synchronization and fairness between hot and cold clients.
  */
 
-import java.io.File;
-import java.io.FileNotFoundException;
+import java.io.BufferedReader;
+import java.io.FileReader;
+import java.io.IOException;
 import java.util.*;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 
 class CoffeeMachine {
-    private final Lock lock = new ReentrantLock();
-    private final Condition hotCondition = lock.newCondition();
-    private final Condition coldCondition = lock.newCondition();
-    private boolean isHotMode = false;  // Machine mode: hot or cold
-    private int availableDispensers = 3;  // Three dispensers available
-    private int hotClientsWaiting = 0;  // Number of hot clients waiting
-    private int coldClientsWaiting = 0;  // Number of cold clients waiting
-    private boolean isMachineInUse = false;  // Tracks whether the machine is in use
+    private Lock lock = new ReentrantLock();
+    private Condition hotCv = lock.newCondition();
+    private Condition coldCv = lock.newCondition();
 
-    // Method for clients to use the machine
-    public void useMachine(Client client) throws InterruptedException {
+    private int hotClientsWaiting = 0;
+    private int coldClientsWaiting = 0;
+    private String activeMode = null; // Can be "hot" or "cold"
+    private int activeClients = 0; // Number of clients currently using the machine
+    private String[] dispensers = new String[3]; // Dispenser states, null means empty
+    private int currentTime = 0; // Logical time tracking system
+
+    private int brewingCount = 0; // Counter for brewing threads
+    private Condition doneCondition = lock.newCondition(); // Condition for done signal
+
+    public CoffeeMachine() {
+        Arrays.fill(dispensers, null);
+    }
+
+    // Getter method for currentTime
+    public int getCurrentTime() {
+        return currentTime;
+    }
+
+    // Method to simulate a hot client making a coffee request
+    public void hotClientRequest(String id, int brewTime) {
         lock.lock();
         try {
-            // Track waiting clients
-            if (client.isHot) {
-                hotClientsWaiting++;
-            } else {
-                coldClientsWaiting++;
+            hotClientsWaiting++;
+            while (activeMode == "cold" || activeClients >= 3) {
+                hotCv.await();  // Wait until it's hot client's turn
+            }
+            activeMode = "hot";
+            hotClientsWaiting--;
+            serveClient(id, brewTime);
+        } catch (InterruptedException e) {
+            e.printStackTrace();
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    // Method to simulate a cold client making a coffee request
+    public void coldClientRequest(String id, int brewTime) {
+        lock.lock();
+        try {
+            coldClientsWaiting++;
+            while (activeMode == "hot" || activeClients >= 3) {
+                coldCv.await();  // Wait until it's cold client's turn
+            }
+            activeMode = "cold";
+            coldClientsWaiting--;
+            serveClient(id, brewTime);
+        } catch (InterruptedException e) {
+            e.printStackTrace();
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    // Method to serve a client and occupy a dispenser
+    private void serveClient(String id, int brewTime) throws InterruptedException {
+        int dispenser = getAvailableDispenser();
+        activeClients++;
+        dispensers[dispenser] = id;
+        brewingCount++;
+
+        // Print the current state
+        System.out.println("(" + currentTime + ") " + id + " uses dispenser " + (dispenser + 1) + " (time: " + brewTime + ")");
+
+        // Start a thread to handle brew completion after brewTime seconds
+        new Thread(() -> {
+            try {
+                int startTime = currentTime;
+                Thread.sleep(brewTime * 1000); // Simulate brew time
+
+                clientDone(dispenser, brewTime, startTime); // Mark client as done after brewing
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            }
+        }).start();
+    }
+
+    // Client is done, free the dispenser and update time
+    private void clientDone(int dispenser, int brewTime, int startTime) {
+        lock.lock();
+        try {
+            dispensers[dispenser] = null;
+            activeClients--;
+            brewingCount--; // Decrement the brewing counter
+
+            // Signal the done condition if all brewing is finished
+            if (brewingCount == 0) {
+                doneCondition.signalAll();
+            }
+            int endTime = brewTime + startTime;
+
+            // Update the current time to reflect when this client finishes brewing
+            if (currentTime < endTime) {
+                currentTime = endTime;
             }
 
-            // Set the mode for the first client
-            if (!isMachineInUse) {
-                isMachineInUse = true;
-                isHotMode = client.isHot;
-            }
-
-            // Wait if the client type doesn't match the current mode, or no dispensers are available
-            while ((client.isHot && !isHotMode) || (!client.isHot && isHotMode) || availableDispensers == 0) {
-                if (client.isHot) {
-                    hotCondition.await();  // Hot client waits
+            if (activeClients == 0) {  // If all clients are done, switch mode
+                if (coldClientsWaiting > 0) {
+                    activeMode = "cold";
+                    coldCv.signalAll();
+                } else if (hotClientsWaiting > 0) {
+                    activeMode = "hot";
+                    hotCv.signalAll();
                 } else {
-                    coldCondition.await();  // Cold client waits
+                    activeMode = null;
                 }
+            } else if (coldClientsWaiting > 0 && activeMode == "cold") {
+                coldCv.signalAll();
             }
+        } finally {
+            lock.unlock();
+        }
+    }
 
-            // Occupy a dispenser
-            availableDispensers--;
-            int dispenserId = 3 - availableDispensers;  // Assign dispenser id (1, 2, or 3)
-            System.out.printf("(%d) %s uses dispenser %d (time: %d)\n", client.arrivalTime, client.id, dispenserId, client.brewTime);
-
-            // Simulate brew time
-            lock.unlock();  // Release lock while brewing
-            Thread.sleep(client.brewTime * 100);  // Simulate brew time in milliseconds
-            lock.lock();  // Reacquire lock after brew
-
-            // Free the dispenser after brewing
-            availableDispensers++;
-
-            // Update waiting clients count
-            if (client.isHot) {
-                hotClientsWaiting--;
-            } else {
-                coldClientsWaiting--;
+    // Find the first available dispenser
+    private int getAvailableDispenser() {
+        for (int i = 0; i < dispensers.length; i++) {
+            if (dispensers[i] == null) {
+                return i;
             }
+        }
+        return -1; // Should never happen since we limit activeClients to 3
+    }
 
-            // Signal the next clients waiting based on mode
-            if (hotClientsWaiting == 0 && coldClientsWaiting > 0) {
-                isHotMode = false;
-                coldCondition.signalAll();  // Let cold clients go next
-            } else if (coldClientsWaiting == 0 && hotClientsWaiting > 0) {
-                isHotMode = true;
-                hotCondition.signalAll();  // Let hot clients go next
-            } else if (isHotMode) {
-                hotCondition.signalAll();  // Continue serving hot clients if there are more
-            } else {
-                coldCondition.signalAll();  // Continue serving cold clients if there are more
+    // Wait for all brewing operations to complete
+    public void waitForCompletion() {
+        lock.lock();
+        try {
+            while (brewingCount > 0) {
+                doneCondition.await(); // Wait until all brewing is done
             }
-
-            // Reset machine mode if no clients are waiting
-            if (availableDispensers == 3 && hotClientsWaiting == 0 && coldClientsWaiting == 0) {
-                isMachineInUse = false;
-                isHotMode = false;  // Allow the mode to switch freely
-            }
-
+        } catch (InterruptedException e) {
+            e.printStackTrace();
         } finally {
             lock.unlock();
         }
@@ -98,65 +163,82 @@ class CoffeeMachine {
 }
 
 // Client class representing hot or cold clients
-class Client {
-    String id;
-    boolean isHot;
-    int brewTime;
-    int arrivalTime;
+class Client implements Runnable {
+    private String id;
+    private int brewTime;
+    private CoffeeMachine coffeeMachine;
+    private boolean isHot;
 
-    public Client(String id, int brewTime, int arrivalTime) {
+    public Client(String id, int brewTime, CoffeeMachine coffeeMachine, boolean isHot) {
         this.id = id;
         this.brewTime = brewTime;
-        this.arrivalTime = arrivalTime;
-        this.isHot = id.charAt(0) == 'H';  // Identify if client wants hot or cold coffee
+        this.coffeeMachine = coffeeMachine;
+        this.isHot = isHot;
+    }
+
+    @Override
+    public void run() {
+        if (isHot) {
+            coffeeMachine.hotClientRequest(id, brewTime);
+        } else {
+            coffeeMachine.coldClientRequest(id, brewTime);
+        }
     }
 }
 
 public class P2 {
+    // Function to read input from file
+    public static List<Client> readInput(CoffeeMachine coffeeMachine, String filename) {
+        List<Client> clients = new ArrayList<>();
+        try (BufferedReader br = new BufferedReader(new FileReader(filename))) {
+            // Read the number of clients
+            int numClients = Integer.parseInt(br.readLine());
 
-    public static void main(String[] args) throws FileNotFoundException, InterruptedException {
+            // Read each client line
+            for (int i = 0; i < numClients; i++) {
+                String line = br.readLine();
+                String[] parts = line.split(" ");
+                String clientId = parts[0];
+                int brewTime = Integer.parseInt(parts[1]);
+                boolean isHot = clientId.startsWith("H");
+
+                clients.add(new Client(clientId, brewTime, coffeeMachine, isHot));
+            }
+        } catch (IOException e) {
+            System.err.println("Error reading input file: " + e.getMessage());
+        }
+
+        return clients;
+    }
+
+    public static void main(String[] args) throws InterruptedException {
         if (args.length != 1) {
-            System.out.println("Please provide the input file name.");
+            System.err.println("Usage: java P2 <input_file>");
             return;
         }
 
-        List<Client> clients = readClientsFromFile(args[0]);
-        CoffeeMachine machine = new CoffeeMachine();
+        String filename = args[0];
+        CoffeeMachine coffeeMachine = new CoffeeMachine();
+        List<Client> clients = readInput(coffeeMachine, filename);
 
         List<Thread> threads = new ArrayList<>();
+
+        // Create and start a thread for each client
         for (Client client : clients) {
-            Thread thread = new Thread(() -> {
-                try {
-                    machine.useMachine(client);
-                } catch (InterruptedException e) {
-                    e.printStackTrace();
-                }
-            });
-            threads.add(thread);
-            thread.start();  // Start the client thread
+            Thread t = new Thread(client);
+            threads.add(t);
+            t.start();
         }
 
-        // Wait for all threads to complete
-        for (Thread thread : threads) {
-            thread.join();
+        // Wait for all threads to finish
+        for (Thread t : threads) {
+            t.join();
         }
 
-        System.out.println("DONE");
-    }
+        // Wait for all brewing to complete
+        coffeeMachine.waitForCompletion();
 
-    // Method to read client data from file
-    public static List<Client> readClientsFromFile(String fileName) throws FileNotFoundException {
-        List<Client> clients = new ArrayList<>();
-        Scanner scanner = new Scanner(new File(fileName));
-
-        int numClients = scanner.nextInt();  // Number of clients in the file
-        int currentTime = 0;
-        for (int i = 0; i < numClients; i++) {
-            String id = scanner.next();  // Client ID (e.g., H1, C1)
-            int brewTime = scanner.nextInt();  // Brew time for the client
-            clients.add(new Client(id, brewTime, currentTime));  // Add client to the list
-            currentTime += brewTime;  // Update current time for each client
-        }
-        return clients;
+        // Print done when all clients are served
+        System.out.println("(" + coffeeMachine.getCurrentTime() + ") DONE");
     }
 }
